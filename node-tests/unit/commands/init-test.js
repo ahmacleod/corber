@@ -1,27 +1,59 @@
 const td               = require('testdouble');
 const expect           = require('../../helpers/expect');
-const mockProject      = require('../../fixtures/corber-mock/project');
 const Promise          = require('rsvp').Promise;
+const mockProject      = require('../../fixtures/corber-mock/project');
 const isAnything       = td.matchers.anything();
 
-const setupCmd = function(stubCreate) {
-  if (stubCreate) {
-    let CreateProject = td.replace('../../../lib/tasks/create-project');
-    td.replace(CreateProject.prototype, 'run', function() {
-      return Promise.resolve();
+describe('Init Command', () => {
+  let CreateProject;
+  let PlatformTask;
+  let fsUtils;
+  let getOS;
+  let getVersions;
+
+  let initCommand;
+  let opts;
+  let ui;
+
+  beforeEach(() => {
+    CreateProject = td.replace('../../../lib/tasks/create-project');
+    td.when(CreateProject.prototype.run()).thenReturn(Promise.resolve());
+
+    PlatformTask = td.replace('../../../lib/targets/cordova/tasks/platform')
+    td.when(PlatformTask.prototype.run(), { ignoreExtraArgs: true })
+      .thenReturn(Promise.resolve());
+
+    fsUtils = td.replace('../../../lib/utils/fs-utils');
+    td.when(fsUtils.existsSync('corber')).thenReturn(false);
+
+    getOS = td.replace('../../../lib/utils/get-os');
+    td.when(getOS()).thenReturn('linux');
+
+    getVersions = td.replace('../../../lib/utils/get-versions');
+    td.when(getVersions(), { ignoreExtraArgs: true }).thenReturn({
+      corber: {
+        project: {}
+      }
     });
-  }
-  let InitCommand = require('../../../lib/commands/init');
-  return new InitCommand({
-    project: mockProject.project,
-    ui: mockProject.ui
-  });
-};
 
-describe('Init Command', function() {
-  let opts = {};
+    td.replace('../../../lib/utils/logger');
 
-  beforeEach(function() {
+    ui = td.object(['prompt']);
+    td.when(ui.prompt(), { ignoreExtraArgs: true })
+      .thenReturn(Promise.resolve());
+
+    // hijack parent class; this is necessary because `getVersions` is used
+    // by both the parent `Command` and the subclass `InitCommand`
+    let Command = require('../../../lib/commands/-command').extend();
+    td.replace('../../../lib/commands/-command', Command);
+
+    let InitCommand = require('../../../lib/commands/init');
+
+    initCommand = new InitCommand({
+      project: mockProject.project,
+      ui
+    });
+
     opts = {
       cordovaId: 'cordovaId',
       name: 'cordovaName',
@@ -30,20 +62,12 @@ describe('Init Command', function() {
     };
   });
 
-  afterEach(function() {
+  afterEach(() => {
     td.reset();
   });
 
-  it('sets cordovaId, name & templatePath on createproject', function() {
-    let called;
-    let CreateProject = td.replace('../../../lib/tasks/create-project');
-    td.replace(CreateProject.prototype, 'run', function() {
-      called = true;
-      return Promise.resolve();
-    });
-
-    let init = setupCmd();
-    return init.run(opts).then(() => {
+  it('sets cordovaId, name & templatePath on createproject', () => {
+    return initCommand.run(opts).then(() => {
       td.verify(new CreateProject({
         project: isAnything,
         ui: isAnything,
@@ -51,156 +75,142 @@ describe('Init Command', function() {
         name: 'cordovaName',
         templatePath: 'templatePath'
       }));
-
-      expect(called).to.equal(true);
-    });
-
-  });
-
-  it('calls installPlatforms with --platform', function() {
-    let init = setupCmd(true);
-    let installDouble = td.replace(init, 'installPlatforms');
-
-    return init.run(opts).then(() => {
-      td.verify(installDouble(['ios']));
     });
   });
 
-  it('prompts then installs platforms when --platform is not passed', function() {
-    let init = setupCmd(true);
-    let passedPlatforms = [];
-    opts.platform = undefined;
+  it('calls installPlatforms with --platform', () => {
+    let installPlatforms = td.replace(initCommand, 'installPlatforms');
 
-    td.replace(init, 'installPlatforms', function(platforms) {
-      passedPlatforms = platforms;
-      return Promise.resolve();
-    });
-
-    init.ui = {
-      prompt: function(opts) {
-        return Promise.resolve({platforms: ['ios', 'android']});
-      }
-    };
-
-    return init.run(opts).then(() => {
-      expect(passedPlatforms).to.deep.equal(['ios', 'android']);
+    return initCommand.run(opts).then(() => {
+      td.verify(installPlatforms(['ios']), { ignoreExtraArgs: true });
     });
   });
 
-  it('does not call installPlatforms if the selected platform is none', function() {
-    let init = setupCmd(true);
-    let installDouble = td.replace(init, 'installPlatforms');
-    opts.platform = undefined;
-
-    init.ui = {
-      prompt: function(opts) {
-        return Promise.resolve({platforms: ['none']});
-      }
-    }
-
-    return init.run(opts).then(() => {
-      td.verify(installDouble(), {times: 0});
+  context('when --platform is not passed', () => {
+    beforeEach(() => {
+      opts.platform = undefined;
     });
-  });
 
-  describe('validateAndRun', function() {
-    context('when corber is already initialized', function() {
-      it('throws an exception', function() {
-        td.replace('../../../lib/utils/get-versions', () => {
-          return {
-            corber: {
-              project: {
-                required: '1.0.0'
-              }
-            }
-          };
+    it('prompts then installs platforms', () => {
+      td.when(ui.prompt(td.matchers.contains({ name: 'platforms' })))
+        .thenReturn(Promise.resolve({ platforms: ['ios', 'android'] }));
+
+      return initCommand.run(opts).then(() => {
+        let platform = td.matchers.captor();
+
+        td.config({ ignoreWarnings: true });
+        td.verify(PlatformTask.prototype.run('add', platform.capture()), {
+          ignoreExtraArgs: true
         });
+        td.config({ ignoreWarnings: false });
 
-        let init = setupCmd();
-        expect(() => init.validateAndRun()).to.throw();
+        expect(platform.values).to.include('android');
+        expect(platform.values).to.include('ios');
       });
     });
 
-    context('when corber folder already exists in project', function() {
-      it('throws an exception', function () {
-        td.replace('../../../lib/utils/fs-utils', 'existsSync', (path) => {
-          return path !== './corber';
+    it('does not call installPlatforms if selected platform is none', () => {
+      td.when(ui.prompt(td.matchers.contains({ name: 'platforms' })))
+        .thenReturn(Promise.resolve({ platforms: ['none'] }));
+
+      return initCommand.run(opts).then(() => {
+        td.config({ ignoreWarnings: true });
+
+        td.verify(PlatformTask.prototype.run(), {
+          ignoreExtraArgs: true,
+          times: 0
         });
 
-        let init = setupCmd();
-        expect(() => init.validateAndRun()).to.throw();
+        td.config({ ignoreWarnings: false });
       });
     });
   });
 
-  describe('getPlatforms', function() {
-    it('splits a single string', function() {
-      let init = setupCmd();
-      let platforms = init.getPlatforms('ios');
+  describe('validateAndRun', () => {
+    it('throws exception when corber initialized', () => {
+      td.when(getVersions(mockProject.project.root)).thenReturn({
+        corber: {
+          project: {
+            required: '1.0.0'
+          }
+        }
+      });
+
+      return expect(() => initCommand.validateAndRun()).to.throw();
+    });
+
+    it('throws exception when project corber folder exists', () => {
+      td.when(fsUtils.existsSync('corber')).thenReturn(true);
+      return expect(() => initCommand.validateAndRun()).to.throw();
+    });
+  });
+
+  describe('deserializePlatforms', () => {
+    it('splits a single string', () => {
+      let platforms = initCommand.deserializePlatforms('ios');
       expect(platforms).to.deep.equal(['ios']);
     });
 
-    it('splits a multi string', function() {
-      let init = setupCmd();
-      let platforms = init.getPlatforms('ios,android');
+    it('splits a multi string', () => {
+      let platforms = initCommand.deserializePlatforms('ios,android');
       expect(platforms).to.deep.equal(['ios', 'android']);
     });
   });
 
-  describe('buildPromptOptions', function() {
-    context('is win32', function() {
-      it('does not includes an ios option', function() {
-        td.replace('../../../lib/utils/get-os', function() {
-          return 'win32';
-        });
-
-        let init = setupCmd();
-
-        expect(init.buildPromptOptions()['choices'].length).to.eq(2);
+  describe('buildPromptOptions', () => {
+    context('is win32', () => {
+      it('does not includes an ios option', () => {
+        td.when(getOS()).thenReturn('win32');
+        let promptOptions = initCommand.buildPromptOptions();
+        expect(promptOptions.choices).to.not.contain('ios');
       });
     });
 
-    context('is darwin', function() {
-      it('includes an ios option', function() {
-        td.replace('../../../lib/utils/get-os', function() {
-          return 'darwin';
-        });
-
-        let init = setupCmd();
-
-        expect(init.buildPromptOptions()['choices'].length).to.eq(3);
+    context('is darwin', () => {
+      it('includes an ios option', () => {
+        td.when(getOS()).thenReturn('darwin');
+        let promptOptions = initCommand.buildPromptOptions();
+        expect(promptOptions.choices).to.contain('ios');
       });
     });
   });
 
-  describe('installPlatforms', function() {
-    it('installs each passed platform', function() {
-      let calls = [];
+  describe('installPlatforms', () => {
+    it('installs each passed platform', () => {
+      return initCommand.installPlatforms(['ios', 'android']).then(() => {
+        let platform = td.matchers.captor();
 
-      let PlatformTask = require('../../../lib/targets/cordova/tasks/platform');
-      td.replace(PlatformTask.prototype, 'run', function(action, platform) {
-        calls.push(platform);
-      });
-      let init = setupCmd();
+        td.config({ ignoreWarnings: true });
+        td.verify(PlatformTask.prototype.run('add', platform.capture()), {
+          ignoreExtraArgs: true
+        });
+        td.config({ ignoreWarnings: false });
 
-      return init.installPlatforms(['ios', 'android']).then(() => {
-        expect(calls).to.deep.equal(['ios', 'android']);
+        expect(platform.values).to.include('android');
+        expect(platform.values).to.include('ios');
       });
     });
 
-    it('passes webview and save options to the platform task', function() {
-      let calls = [];
+    it('passes webview and save options to the platform task', () => {
+      return initCommand.installPlatforms(['ios', 'android'], {
+        uiwebview: false,
+        crosswalk: true
+      }).then(() => {
+        let opts = td.matchers.captor();
 
-      let PlatformTask = require('../../../lib/targets/cordova/tasks/platform');
-      td.replace(PlatformTask.prototype, 'run', function(action, platform, opts) {
-        calls.push(opts);
-        return Promise.resolve();
-      });
+        td.config({ ignoreWarnings: true });
+        td.verify(
+          PlatformTask.prototype.run('add', isAnything, opts.capture())
+        );
+        td.config({ ignoreWarnings: false });
 
-      let init = setupCmd();
-
-      return init.installPlatforms(['ios', 'android'], {uiwebview: false, crosswalk: true}).then(function() {
-        expect(calls[0]).to.deep.equal({uiwebview: false, crosswalk: true, save: true});
+        opts.values.forEach((capturedOpts) => {
+          expect(capturedOpts).to.deep.equal({
+            uiwebview: false,
+            crosswalk: true,
+            save: true
+          });
+        });
       });
     });
   });
