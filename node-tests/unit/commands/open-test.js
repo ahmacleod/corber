@@ -1,40 +1,57 @@
-'use strict';
+const td            = require('testdouble');
+const expect        = require('../../helpers/expect');
+const Promise       = require('rsvp').Promise;
 
-var td              = require('testdouble');
-var PromiseExt      = require('rsvp');
+const mockProject   = require('../../fixtures/corber-mock/project');
+const mockAnalytics = require('../../fixtures/corber-mock/analytics');
 
-var OpenCmd         = require('../../../lib/commands/open');
-var OpenTask        = require('../../../lib/targets/cordova/tasks/open-app');
+describe('Open Command', () => {
+  let OpenAppTask;
+  let logger;
 
-var mockProject     = require('../../fixtures/corber-mock/project');
-var mockAnalytics   = require('../../fixtures/corber-mock/analytics');
+  let open;
+  let options;
 
-describe('Open Command', function() {
-  var open;
+  beforeEach(() => {
+    OpenAppTask = td.replace('../../../lib/targets/cordova/tasks/open-app');
+    logger = td.replace('../../../lib/utils/logger');
 
-  beforeEach(function() {
+    td.when(OpenAppTask.prototype.run(), { ignoreExtraArgs: true })
+      .thenReturn(Promise.resolve());
+
+    let OpenCmd = require('../../../lib/commands/open');
+
     open = new OpenCmd({
       project: mockProject.project
     });
+
     open.analytics = mockAnalytics;
 
-    td.replace(
-      OpenTask.prototype,
-      'run',
-      function() { return PromiseExt.resolve(); }
-    );
+    options = {
+      application: 'dummy',
+      platform: 'ios'
+    };
   });
 
-  afterEach(function() {
+  afterEach(() => {
     td.reset();
   });
 
-  it('runs Open App Task', function() {
-    var options =  { application: 'dummy', platform: 'ios' };
+  it('should resolve on completion', () => {
+    return expect(open.run(options)).to.eventually.be.fulfilled;
+  });
 
-    return open.run(options)
-      .then(function() {
-        return true;
-      });
+  it('logs an opening message', () => {
+    return open.run(options).then(() => {
+      td.verify(logger.info('Opening app for ios'));
+    });
+  });
+
+  it('runs Open App Task', () => {
+    return open.run(options).then(() => {
+      td.config({ ignoreWarnings: true });
+      td.verify(OpenAppTask.prototype.run());
+      td.config({ ignoreWarnings: false });
+    });
   });
 });
