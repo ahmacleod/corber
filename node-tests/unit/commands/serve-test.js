@@ -1,138 +1,119 @@
-'use strict';
+const td              = require('testdouble');
+const expect          = require('../../helpers/expect');
+const Promise         = require('rsvp');
+const cloneDeep       = require('lodash').cloneDeep;
 
-var td              = require('testdouble');
-var expect          = require('../../helpers/expect');
-var Promise         = require('rsvp');
+const mockProject     = require('../../fixtures/corber-mock/project');
+const mockAnalytics   = require('../../fixtures/corber-mock/analytics');
 
-var CdvBuildTask    = require('../../../lib/targets/cordova/tasks/build');
-var BashTask        = require('../../../lib/tasks/bash');
-var HookTask        = require('../../../lib/tasks/run-hook');
-var LRloadShellTask = require('../../../lib/tasks/create-livereload-shell');
+describe('Serve Command', () => {
+  let editXML;
+  let HookTask;
+  let CreateLRShellTask;
+  let requireFramework;
+  let requireTarget;
+  let logger;
 
-var mockProject     = require('../../fixtures/corber-mock/project');
-var mockAnalytics   = require('../../fixtures/corber-mock/analytics');
+  let mockFramework;
+  let mockTarget;
 
-var ValidatePlugin          = require('../../../lib/targets/cordova/validators/plugin');
-var ValidateAllowNavigation = require('../../../lib/targets/cordova/validators/allow-navigation');
+  let serve;
+  let project;
+  let opts;
 
-describe('Serve Command', function() {
-  var serveCmd;
-  var tasks = [];
+  let setupTaskTracking = (tasks) => {
+    let stubTask = (id, returnValue) => {
+      return (...args) => {
+        let label = typeof (id) === 'function' ? id(...args) : id;
+        tasks.push(label);
+        return Promise.resolve(returnValue);
+      }
+    };
 
-  afterEach(function() {
+    td.replace(editXML, 'addNavigation', stubTask('add-navigation'));
+    td.replace(editXML, 'removeNavigation', stubTask('remove-navigation'));
+    td.replace(HookTask.prototype, 'run', stubTask((name) => `hook ${name}`));
+    td.replace(CreateLRShellTask.prototype, 'run', stubTask('create-livereload-shell'));
+    td.replace(mockFramework, 'validateServe', stubTask('framework-validate-serve'));
+    td.replace(mockFramework, 'serve', stubTask('framework-serve'));
+    td.replace(mockTarget, 'validateServe', stubTask('cordova-validate-serve'));
+    td.replace(mockTarget, 'build', stubTask('cordova-build'));
+  };
+
+  beforeEach(() => {
+    let getNetworkIp;
+
+    editXML           = td.replace('../../../lib/targets/cordova/utils/edit-xml');
+    HookTask          = td.replace('../../../lib/tasks/run-hook');
+    CreateLRShellTask = td.replace('../../../lib/tasks/create-livereload-shell');
+    requireFramework  = td.replace('../../../lib/utils/require-framework');
+    requireTarget     = td.replace('../../../lib/utils/require-target');
+    getNetworkIp      = td.replace('../../../lib/utils/get-network-ip');
+    logger            = td.replace('../../../lib/utils/logger');
+
+    mockFramework     = td.object(['validateServe', 'serve']);
+    mockTarget        = td.object(['validateServe', 'build']);
+
+    project = cloneDeep(mockProject.project);
+    project.config = () => ({ locationType: 'hash' });
+
+    td.when(editXML.addNavigation(), { ignoreExtraArgs: true })
+      .thenReturn(Promise.resolve());
+
+    td.when(requireFramework(project)).thenReturn(mockFramework);
+
+    td.when(requireTarget(project), { ignoreExtraArgs: true })
+      .thenReturn(mockTarget);
+
+    td.when(getNetworkIp()).thenReturn('192.168.0.1');
+
+    let ServeCommand = require('../../../lib/commands/serve');
+
+    serve = new ServeCommand({
+      project
+    });
+
+    serve.analytics = mockAnalytics;
+
+    opts = { platform: 'ios' };
+  });
+
+  afterEach(() => {
     td.reset();
   });
 
-  beforeEach(function() {
-    mockTasks();
-
-    var ServeCmd = require('../../../lib/commands/serve');
-    td.replace(ServeCmd, '_serveHang', function() {
-      return Promise.resolve();
-    });
-
-    serveCmd = new ServeCmd({
-      project: mockProject.project
-    });
-
-    serveCmd.analytics = mockAnalytics;
-    serveCmd.project.config = function() {
-      return {
-        locationType: 'hash',
-
-      };
-    };
+  it('to resolve on completion', () => {
+    return expect(serve.run(opts)).to.eventually.be.fulfilled;
   });
 
-  function mockTasks() {
-    tasks = [];
-
-    td.replace('../../../lib/utils/require-framework', function() {
-      return {
-        validateServe: function() {
-          tasks.push('framework-validate-serve');
-          return Promise.resolve();
-        },
-
-        serve: function() {
-          tasks.push('framework-serve');
-          return Promise.resolve();
-        }
-      };
+  it('advertises the start command', () => {
+    return serve.run(opts).then(() => {
+      td.verify(logger.info(td.matchers.contains('corber start')));
     });
-
-    td.replace('../../../lib/targets/cordova/utils/edit-xml', {
-      addNavigation: function() {
-        tasks.push('add-navigation');
-        return Promise.resolve();
-      },
-
-      removeNavigation: function() {
-        tasks.push('remove-navigation');
-        return Promise.resolve();
-      }
-    });
-
-    td.replace(HookTask.prototype, 'run', function(hookName, options) {
-      expect(options, `${hookName} options`).to.be.an('object');
-      tasks.push('hook ' + hookName);
-      return Promise.resolve();
-    });
-
-    td.replace(ValidatePlugin.prototype, 'run', function() {
-      tasks.push('validate-plugin');
-      return Promise.resolve();
-    });
-
-    td.replace(ValidateAllowNavigation.prototype, 'run', function() {
-      tasks.push('validate-allow-navigation');
-      return Promise.resolve();
-    });
-
-
-    td.replace(LRloadShellTask.prototype, 'run', function() {
-      tasks.push('create-livereload-shell');
-      return Promise.resolve();
-    });
-
-    td.replace(CdvBuildTask.prototype, 'run', function() {
-      tasks.push('cordova-build');
-      return Promise.resolve();
-    });
-
-    td.replace(BashTask.prototype, 'run', function() {
-      tasks.push('serve-bash');
-      return Promise.resolve();
-    });
-  }
-
-  it('exits cleanly', function() {
-    return expect(function() {
-      serveCmd.run({});
-    }).not.to.throw(Error);
   });
 
-  it('sets vars for webpack livereload', function() {
-    return serveCmd.run({platform: 'ios'}).then(function() {
-      let project = mockProject.project;
+  it('sets vars for webpack livereload', () => {
+    return serve.run(opts).then(() => {
       expect(project.CORBER_PLATFORM).to.equal('ios');
     });
   });
 
-  it('sets process.env.CORBER_PLATFORM & CORBER_LIVERELOAD', function() {
-    return serveCmd.run({platform: 'ios'}).then(function() {
+  it('sets process.env.CORBER_PLATFORM & CORBER_LIVERELOAD', () => {
+    return serve.run(opts).then(() => {
       expect(process.env.CORBER_PLATFORM).to.equal('ios');
       expect(process.env.CORBER_LIVERELOAD).to.equal('true');
     });
   });
 
-  it('runs tasks in the correct order', function() {
-    return serveCmd.run({}).then(function() {
+  it('runs tasks in the correct order', () => {
+    let tasks = [];
+    setupTaskTracking(tasks);
+
+    return serve.run(opts).then(() => {
       expect(tasks).to.deep.equal([
         'add-navigation',
         'hook beforeBuild',
-        'validate-allow-navigation',
-        'validate-plugin',
+        'cordova-validate-serve',
         'framework-validate-serve',
         'create-livereload-shell',
         'cordova-build',
@@ -143,21 +124,52 @@ describe('Serve Command', function() {
     });
   });
 
-  it('skips emer & cordova builds with --skip flags', function() {
-    return serveCmd.run({
-      skipFrameworkBuild: true,
-      skipCordovaBuild: true
-    }).then(function() {
+  it('skips cordova builds with --skip-cordova-build flag', () => {
+    let tasks = [];
+    setupTaskTracking(tasks);
+
+    opts.skipCordovaBuild = true;
+
+    return serve.run(opts).then(() => {
       expect(tasks).to.deep.equal([
         'add-navigation',
         'hook beforeBuild',
-        'validate-allow-navigation',
-        'validate-plugin',
+        'cordova-validate-serve',
         'framework-validate-serve',
         'create-livereload-shell',
         'hook afterBuild',
+        'framework-serve',
         'remove-navigation'
       ]);
+    });
+  });
+
+  it('skips framework serve with --skip-framework-serve flag', () => {
+    let tasks = [];
+    setupTaskTracking(tasks);
+
+    opts.skipFrameworkServe = true;
+
+    return serve.run(opts).then(() => {
+      expect(tasks).to.deep.equal([
+        'add-navigation',
+        'hook beforeBuild',
+        'cordova-validate-serve',
+        'framework-validate-serve',
+        'create-livereload-shell',
+        'cordova-build',
+        'hook afterBuild',
+        'remove-navigation'
+      ]);
+    });
+  });
+
+  it('logs to info on serve', () => {
+    let getReloadUrl = td.replace(serve, 'getReloadUrl', td.function());
+    td.when(getReloadUrl(), { ignoreExtraArgs: true }).thenReturn('url');
+
+    return serve.run(opts).then(() => {
+      td.verify(logger.info(`Serving on url`));
     });
   });
 });
